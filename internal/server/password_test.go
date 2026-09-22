@@ -688,3 +688,108 @@ func TestRenameResponseCarriesNewName(t *testing.T) {
 		t.Errorf("rename response = %s, want the updated name", body)
 	}
 }
+
+func TestChangeOwnPassword(t *testing.T) {
+	h := newPasswordHarness(t)
+	plainHeaders := func(session string) map[string]string {
+		return map[string]string{"Cookie": auth.CookieName + "=" + session, "Content-Type": "application/json"}
+	}
+
+	// Two sessions for the plain user: one will change the password, the
+	// other must die with the change.
+	sessionA, _ := h.login(t, plainEmail, plainPassword)
+	sessionB, _ := h.login(t, plainEmail, plainPassword)
+	csrfA := func() string { return h.csrf(t, sessionA) }
+
+	// Wrong current password: refused, nothing changes.
+	resp := h.do(t, "POST", "/api/me/password",
+		strings.NewReader(`{"current_password":"not-my-password-1","new_password":"rotated-password-9"}`),
+		mergeHeaders(map[string]string{"X-CSRF-Token": csrfA()}, plainHeaders(sessionA)))
+	if body := readBody(t, resp); resp.StatusCode != http.StatusUnauthorized || !strings.Contains(body, "current password") {
+		t.Fatalf("wrong current = %d %s, want 401", resp.StatusCode, body)
+	}
+	if resp := h.do(t, "POST", "/api/login",
+		strings.NewReader(`{"email":`+quote(plainEmail)+`,"password":`+quote(plainPassword)+`}`),
+		map[string]string{"Content-Type": "application/json"}); resp.StatusCode != http.StatusOK {
+		t.Errorf("old password must still work after refusal, got %d", resp.StatusCode)
+		resp.Body.Close()
+	} else {
+		resp.Body.Close()
+	}
+
+	// Short new password: fixed-message 400.
+	resp = h.do(t, "POST", "/api/me/password",
+		strings.NewReader(`{"current_password":`+quote(plainPassword)+`,"new_password":"short"}`),
+		mergeHeaders(map[string]string{"X-CSRF-Token": csrfA()}, plainHeaders(sessionA)))
+	if body := readBody(t, resp); resp.StatusCode != http.StatusBadRequest || strings.Contains(body, "short") {
+		t.Fatalf("short new = %d %s, want 400 without echoing the password", resp.StatusCode, body)
+	}
+
+	// The happy path: 204, no body.
+	resp = h.do(t, "POST", "/api/me/password",
+		strings.NewReader(`{"current_password":`+quote(plainPassword)+`,"new_password":"rotated-password-9"}`),
+		mergeHeaders(map[string]string{"X-CSRF-Token": csrfA()}, plainHeaders(sessionA)))
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("change = %d (body: %s), want 204", resp.StatusCode, readBody(t, resp))
+	}
+
+	// The old credential is dead; the new one logs in.
+	if resp := h.do(t, "POST", "/api/login",
+		strings.NewReader(`{"email":`+quote(plainEmail)+`,"password":`+quote(plainPassword)+`}`),
+		map[string]string{"Content-Type": "application/json"}); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("old password after change = %d, want 401", resp.StatusCode)
+		resp.Body.Close()
+	}
+	if _, data := h.login(t, plainEmail, "rotated-password-9"); data["email"] != plainEmail {
+		t.Error("new password does not log in")
+	}
+
+	// The acting session survives; the sibling one is revoked.
+	resp = h.do(t, "GET", "/api/me", nil, map[string]string{"Cookie": auth.CookieName + "=" + sessionA})
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("acting session after change = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = h.do(t, "GET", "/api/me", nil, map[string]string{"Cookie": auth.CookieName + "=" + sessionB})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("sibling session after change = %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestSuperadminResetRevokesTargetSessions(t *testing.T) {
+	h := newPasswordHarness(t)
+	admin, _ := h.login(t, superadminEmail, superadminPassword)
+	adminHeaders := h.authHeaders(t, admin)
+	targetSession, _ := h.login(t, plainEmail, plainPassword)
+	targetID := h.userIDByEmail(t, adminHeaders, plainEmail)
+
+	resp := h.do(t, "POST", "/api/users/"+strconv.FormatInt(targetID, 10)+"/password",
+		strings.NewReader(`{"password":"reset-password-9"}`), adminHeaders)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reset = %d", resp.StatusCode)
+	}
+	// The target's pre-existing session is gone.
+	resp = h.do(t, "GET", "/api/me", nil, map[string]string{"Cookie": auth.CookieName + "=" + targetSession})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("target session after reset = %d, want 401", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestPasswordChangeDisabledInGoogleMode(t *testing.T) {
+	h := newHarness(t)
+	session := h.login(t)
+	resp := h.do(t, "POST", controlHost, "/api/me/password",
+		strings.NewReader(`{"current_password":"x","new_password":"yyyyyyyy"}`),
+		map[string]string{
+			"Cookie":       auth.CookieName + "=" + session,
+			"X-CSRF-Token": h.csrf(t, session),
+			"Content-Type": "application/json",
+		})
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, "password auth disabled") {
+		t.Errorf("google mode change = %d %s, want 404 password auth disabled", resp.StatusCode, body)
+	}
+}

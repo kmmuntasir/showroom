@@ -8,6 +8,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -227,6 +228,64 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// The owner is no longer the only one who knows this credential: kill
+	// every session of the target, wherever it is logged in.
+	if _, err := s.DB.DeleteUserSessionsExcept(id, ""); err != nil {
+		slog.Error("revoke sessions after password reset", "err", err)
+	}
 	s.Audit.MustEvent(sess.Actor(), "user.password_reset", target.Email, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"user": userToJSON(target)})
+}
+
+// handlePasswordChange is POST /api/me/password: self-service password
+// change (password auth mode). The current password authorizes the change
+// — a stolen session alone must not be able to lock the real owner out.
+// Success revokes every OTHER session of the user; the acting session
+// survives so the change does not log the user out.
+func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
+	if s.Cfg.AuthMode != config.AuthModePassword {
+		writeErr(w, http.StatusNotFound, "password auth disabled")
+		return
+	}
+	sess, _ := auth.FromContext(r.Context())
+	if sess.UserID == 0 {
+		writeErr(w, http.StatusForbidden, "no local password to change")
+		return
+	}
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	user, err := s.DB.UserByID(sess.UserID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if !auth.CheckPassword(user.PasswordHash, body.CurrentPassword) {
+		writeErr(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	// Fixed message — the new password never appears in an error.
+	hash, err := auth.HashPassword(body.NewPassword)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	if err := s.DB.UpdateUserPassword(user.ID, hash, time.Now().UTC().Unix()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if _, err := s.DB.DeleteUserSessionsExcept(user.ID, sess.IDHash); err != nil {
+		slog.Error("revoke sessions after password change", "err", err)
+	}
+	s.Audit.MustEvent(sess.Actor(), "auth.password_change", user.Email, nil)
+	w.WriteHeader(http.StatusNoContent)
 }

@@ -68,6 +68,11 @@ deep links work.
   superadmin role (password mode) or a `GOOGLE_SUPERADMIN_EMAIL` match
   (google mode). Every action lands in an append-only JSONL audit log tied
   to the actor's identity.
+- On password auth, members change their own password from the dashboard
+  (the current password authorizes it; all other sessions are signed out).
+  A superadmin can reset anyone's password from the user panel, which signs
+  the target out everywhere. Passwords are stored bcrypt-hashed and never
+  appear in logs, errors, or the audit trail.
 
 ## Private demos
 

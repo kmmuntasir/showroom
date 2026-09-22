@@ -19,6 +19,7 @@ import {
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import AccessKeyBox from '../components/AccessKeyBox.jsx'
+import ChangePasswordDialog from '../components/ChangePasswordDialog.jsx'
 import ErrorAlert from '../components/ErrorAlert.jsx'
 import { toaster } from '../components/toaster.jsx'
 import { humanSize, timeAgoOrDate } from '../format.js'
@@ -37,6 +38,7 @@ export default function Dashboard({ email, isSuperadmin, authMode, demos, error,
   const [creating, setCreating] = useState(false)
   const [isPrivate, setIsPrivate] = useState(false)
   const [issuedKey, setIssuedKey] = useState(null)
+  const [pwOpen, setPwOpen] = useState(false)
 
   useEffect(() => {
     onRefresh()
@@ -85,6 +87,11 @@ export default function Dashboard({ email, isSuperadmin, authMode, demos, error,
             <Text fontSize="sm" color="fg.muted">
               Signed in as {email}
             </Text>
+            {authMode === 'password' ? (
+              <Button variant="outline" size="sm" onClick={() => setPwOpen(true)}>
+                Change password
+              </Button>
+            ) : null}
             <Button variant="outline" size="sm" onClick={onSignOut}>
               Sign out
             </Button>
@@ -226,6 +233,8 @@ export default function Dashboard({ email, isSuperadmin, authMode, demos, error,
 
         {isSuperadmin && authMode === 'password' ? <Users /> : null}
       </Stack>
+
+      {authMode === 'password' ? <ChangePasswordDialog open={pwOpen} onClose={() => setPwOpen(false)} /> : null}
     </Container>
   )
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 )
@@ -214,5 +215,51 @@ func TestDeleteUserCascadesSessions(t *testing.T) {
 	}
 	if _, err := s.SessionByIDHash("sess-for-deleted-user"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("session survived its user: %v", err)
+	}
+}
+
+func TestDeleteUserSessionsExcept(t *testing.T) {
+	s := openTest(t)
+	u, _ := s.CreateUser("a@example.com", hashForTests, RoleUser, 1)
+	mk := func(hash string) {
+		t.Helper()
+		sess := Session{
+			IDHash: hash, CSRFToken: "c", GoogleEmail: u.Email,
+			CreatedAt: 1, ExpiresAt: 500,
+		}
+		sess.UserID = sql.NullInt64{Int64: u.ID, Valid: true}
+		if err := s.CreateSession(sess); err != nil {
+			t.Fatalf("CreateSession %s: %v", hash, err)
+		}
+	}
+	mk("keep-me")
+	mk("kill-me-1")
+	mk("kill-me-2")
+
+	n, err := s.DeleteUserSessionsExcept(u.ID, "keep-me")
+	if err != nil {
+		t.Fatalf("DeleteUserSessionsExcept: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("revoked %d, want 2", n)
+	}
+	if _, err := s.SessionByIDHash("keep-me"); err != nil {
+		t.Errorf("kept session removed: %v", err)
+	}
+	if _, err := s.SessionByIDHash("kill-me-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("kill-me-1 survived: %v", err)
+	}
+
+	// Empty keep-hash revokes everything.
+	mk("kill-me-3")
+	n, err = s.DeleteUserSessionsExcept(u.ID, "")
+	if err != nil {
+		t.Fatalf("revoke all: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("revoke-all got %d, want 2", n)
+	}
+	if _, err := s.SessionByIDHash("keep-me"); !errors.Is(err, ErrNotFound) {
+		t.Error("keep-me survived revoke-all")
 	}
 }

@@ -434,6 +434,26 @@ func (s *Store) DeleteSession(idHash string) error {
 	return nil
 }
 
+// DeleteUserSessionsExcept revokes every session of a user except the one
+// hash given (keep "" to revoke all). A password change keeps the acting
+// session alive while killing the rest; a superadmin reset keeps none.
+func (s *Store) DeleteUserSessionsExcept(userID int64, keepIDHash string) (int64, error) {
+	var (
+		res sql.Result
+		err error
+	)
+	if keepIDHash == "" {
+		res, err = s.db.Exec(`DELETE FROM sessions WHERE user_id = ?`, userID)
+	} else {
+		res, err = s.db.Exec(`DELETE FROM sessions WHERE user_id = ? AND id_hash <> ?`, userID, keepIDHash)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: delete user sessions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n, err
+}
+
 // DeleteExpiredSessions removes stale rows; returns how many went.
 func (s *Store) DeleteExpiredSessions(now int64) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM sessions WHERE expires_at < ?`, now)

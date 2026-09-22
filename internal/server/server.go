@@ -97,6 +97,9 @@ func (s *Server) controlMux() http.Handler {
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("GET /api/auth-info", s.handleAuthInfo)
 	mux.HandleFunc("GET /api/me", s.handleMe)
+	// Self-service password change: session, then CSRF, like every
+	// mutation; the current password authorizes it (users.go).
+	mux.HandleFunc("POST /api/me/password", s.Auth.RequireSession(s.requireCSRF(s.handlePasswordChange)))
 	mux.HandleFunc("GET /api/demos", s.Auth.RequireSession(s.handleListDemos))
 	// Every mutation carries the session CSRF token (docs/demos.md §Auth
 	// step 4) — session first, then CSRF, then the handler.
