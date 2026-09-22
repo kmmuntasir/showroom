@@ -37,7 +37,7 @@ export default function Login({ bootError, authMode = 'google', baseDomain, onPa
   return (
     <Stack minH="100vh" align="center" justify="center" gap={6} px={4} textAlign="center">
       <Stack gap={2} align="center" maxW="sm">
-        <Heading size="2xl">democtl</Heading>
+        <Heading size="2xl">Showroom</Heading>
         {authMode === 'password' ? (
           <Text color="fg.muted">Self-serve demo hosting on {baseDomain || 'example.com'} — sign in with your account.</Text>
         ) : (

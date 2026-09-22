@@ -234,7 +234,7 @@ export default function Dashboard({ email, isSuperadmin, authMode, baseDomain, d
           </Stack>
         </Box>
 
-        {isSuperadmin && authMode === 'password' ? <Users /> : null}
+        {isSuperadmin && authMode === 'password' ? <Users currentEmail={email} /> : null}
       </Stack>
 
       {authMode === 'password' ? <ChangePasswordDialog open={pwOpen} onClose={() => setPwOpen(false)} /> : null}

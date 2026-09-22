@@ -21,7 +21,10 @@ import { toaster } from '../components/toaster.jsx'
 // Users is the superadmin-only user management panel (password auth mode):
 // list local accounts, create users/superadmins, reset passwords, delete
 // accounts. It renders nothing unless the caller verified isSuperadmin.
-export default function Users() {
+// currentEmail is the signed-in superadmin: their own row cannot be deleted
+// (the API also rejects self-delete with 409 — this just hides the trap).
+export default function Users({ currentEmail }) {
+  const selfEmail = (currentEmail || '').toLowerCase()
   const [users, setUsers] = useState(null)
   const [error, setError] = useState(null)
   const [email, setEmail] = useState('')
@@ -69,6 +72,9 @@ export default function Users() {
 
   const confirmDelete = async () => {
     if (!pendingDelete) return
+    // Defense in depth: the button is disabled for your own row, and the
+    // API rejects self-delete — never send the request for yourself.
+    if (pendingDelete.email.toLowerCase() === selfEmail) return
     setWorking(true)
     try {
       await api.del(`/api/users/${pendingDelete.id}`)
@@ -129,7 +135,14 @@ export default function Users() {
               <Table.Body>
                 {users.map((user) => (
                   <Table.Row key={user.id}>
-                    <Table.Cell>{user.email}</Table.Cell>
+                    <Table.Cell>
+                      {user.email}
+                      {user.email.toLowerCase() === selfEmail ? (
+                        <Badge colorPalette="teal" variant="subtle" ml={2}>
+                          you
+                        </Badge>
+                      ) : null}
+                    </Table.Cell>
                     <Table.Cell>
                       <Badge colorPalette={user.role === 'superadmin' ? 'purple' : 'gray'} variant="subtle">
                         {user.role}
@@ -148,7 +161,18 @@ export default function Users() {
                         >
                           Reset password
                         </Button>
-                        <Button variant="outline" size="xs" colorPalette="red" onClick={() => setPendingDelete(user)}>
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          colorPalette="red"
+                          disabled={user.email.toLowerCase() === selfEmail}
+                          title={
+                            user.email.toLowerCase() === selfEmail
+                              ? 'You cannot delete your own account'
+                              : undefined
+                          }
+                          onClick={() => setPendingDelete(user)}
+                        >
                           Delete
                         </Button>
                       </HStack>
