@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+audit.jsonl
+node_modules/

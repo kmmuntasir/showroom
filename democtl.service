@@ -1,0 +1,28 @@
+# ============================================================================
+# democtl.service — the self-serve static demo hoster.
+#
+# Install to /etc/systemd/system/democtl.service. Every runtime setting —
+# listen address, hosts, database, audit log, Google OAuth material — is read
+# from /etc/democtl/democtl.env (see .env.example); nothing address- or
+# secret-shaped appears in this unit.
+# ============================================================================
+
+[Unit]
+Description=democtl — self-serve static demo hosting
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/democtl
+EnvironmentFile=/etc/democtl/democtl.env
+User=democtl
+Group=democtl
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/democtl /srv/democtl
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
