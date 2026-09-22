@@ -384,3 +384,27 @@ func TestNotFoundNeverEchoesInput(t *testing.T) {
 		t.Errorf("404 body echoes request input: %q", body)
 	}
 }
+
+func TestLabelFromHost(t *testing.T) {
+	cases := []struct {
+		host string
+		label string
+		ok   bool
+	}{
+		{"demo.example.com", "demo", true},
+		{"DEMO.Example.COM", "demo", true},         // case-insensitive throughout
+		{"demo.example.com:8443", "demo", true},    // port stripped
+		{"example.com", "", false},                 // base domain itself
+		{"a.b.example.com", "", false},             // multi-level label
+		{"demo.other.net", "", false},              // wrong suffix
+		{"example.com:5000", "", false},            // base domain with port
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		label, ok := LabelFromHost(tc.host, testDomain)
+		if ok != tc.ok || label != tc.label {
+			t.Errorf("LabelFromHost(%q) = (%q, %v), want (%q, %v)",
+				tc.host, label, ok, tc.label, tc.ok)
+		}
+	}
+}

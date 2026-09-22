@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -78,7 +77,8 @@ func (a *Authenticator) LoginWithPassword(w http.ResponseWriter, email, password
 		return Session{}, ErrInvalidCredentials
 	}
 	now := a.now()
-	sess, rawID, err := buildSession(user.ID, user.Email, user.Role, "", user.Email, now)
+	sess, rawID, err := buildSession(user.ID, user.Email, user.Role, "", user.Email)
+	sess.Superadmin = user.Role == store.RoleSuperadmin
 	if err != nil {
 		return Session{}, err
 	}
@@ -100,7 +100,7 @@ func (a *Authenticator) LoginWithPassword(w http.ResponseWriter, email, password
 // buildSession mints the id/CSRF pair and the Session value both login
 // paths share. The raw cookie id is returned alongside — it is set on the
 // cookie and never stored.
-func buildSession(userID int64, email, role, googleSub, googleEmail string, now time.Time) (Session, string, error) {
+func buildSession(userID int64, email, role, googleSub, googleEmail string) (Session, string, error) {
 	rawID, err := randomHex(sessionIDBytes)
 	if err != nil {
 		return Session{}, "", fmt.Errorf("auth: session id: %w", err)

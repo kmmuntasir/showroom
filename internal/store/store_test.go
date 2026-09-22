@@ -21,7 +21,7 @@ func openTest(t *testing.T) *Store {
 
 func TestCreateAndFetchDemo(t *testing.T) {
 	s := openTest(t)
-	d, err := s.CreateDemo("acme", "pm@example.com", 1725864000)
+	d, err := s.CreateDemo("acme", "pm@example.com", false, "", 1725864000)
 	if err != nil {
 		t.Fatalf("CreateDemo: %v", err)
 	}
@@ -46,17 +46,17 @@ func TestCreateAndFetchDemo(t *testing.T) {
 
 func TestCreateDemoNameTaken(t *testing.T) {
 	s := openTest(t)
-	if _, err := s.CreateDemo("acme", "a@b.c", 1); err != nil {
+	if _, err := s.CreateDemo("acme", "a@b.c", false, "", 1); err != nil {
 		t.Fatalf("first CreateDemo: %v", err)
 	}
-	if _, err := s.CreateDemo("acme", "x@y.z", 2); !errors.Is(err, ErrNameTaken) {
+	if _, err := s.CreateDemo("acme", "x@y.z", false, "", 2); !errors.Is(err, ErrNameTaken) {
 		t.Errorf("second CreateDemo err = %v, want ErrNameTaken", err)
 	}
 }
 
 func TestRenameDemo(t *testing.T) {
 	s := openTest(t)
-	d, _ := s.CreateDemo("acme", "a@b.c", 1)
+	d, _ := s.CreateDemo("acme", "a@b.c", false, "", 1)
 	if err := s.RenameDemo(d.ID, "acme2", 5); err != nil {
 		t.Fatalf("RenameDemo: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRenameDemo(t *testing.T) {
 		t.Errorf("new name: %v", err)
 	}
 	// Rename onto an existing name conflicts.
-	other, _ := s.CreateDemo("bea", "a@b.c", 2)
+	other, _ := s.CreateDemo("bea", "a@b.c", false, "", 2)
 	if err := s.RenameDemo(other.ID, "acme2", 6); !errors.Is(err, ErrNameTaken) {
 		t.Errorf("colliding rename err = %v, want ErrNameTaken", err)
 	}
@@ -75,7 +75,7 @@ func TestRenameDemo(t *testing.T) {
 
 func TestDeleteDemoCascadesReleases(t *testing.T) {
 	s := openTest(t)
-	d, _ := s.CreateDemo("acme", "a@b.c", 1)
+	d, _ := s.CreateDemo("acme", "a@b.c", false, "", 1)
 	if _, err := s.AddRelease(d.ID, "1-100", "a@b.c", 10, 2, 100); err != nil {
 		t.Fatalf("AddRelease: %v", err)
 	}
@@ -96,8 +96,8 @@ func TestDeleteDemoCascadesReleases(t *testing.T) {
 
 func TestListDemosWithLatestRelease(t *testing.T) {
 	s := openTest(t)
-	d1, _ := s.CreateDemo("acme", "a@b.c", 1)
-	d2, _ := s.CreateDemo("bea", "x@y.z", 2)
+	d1, _ := s.CreateDemo("acme", "a@b.c", false, "", 1)
+	d2, _ := s.CreateDemo("bea", "x@y.z", false, "", 2)
 
 	if _, err := s.ListDemos(); err != nil {
 		t.Fatalf("ListDemos (no releases): %v", err)
@@ -135,7 +135,7 @@ func TestListDemosWithLatestRelease(t *testing.T) {
 
 func TestPruneReleasesKeepsNewest(t *testing.T) {
 	s := openTest(t)
-	d, _ := s.CreateDemo("acme", "a@b.c", 1)
+	d, _ := s.CreateDemo("acme", "a@b.c", false, "", 1)
 	for i, ts := range []int64{100, 200, 300} {
 		dir := fmt.Sprintf("%d-%d", i+1, ts)
 		if _, err := s.AddRelease(d.ID, dir, "a@b.c", int64(i), 1, ts); err != nil {
@@ -155,9 +155,100 @@ func TestPruneReleasesKeepsNewest(t *testing.T) {
 	}
 }
 
+func TestCreateDemoPrivateRoundTrip(t *testing.T) {
+	s := openTest(t)
+	priv, err := s.CreateDemo("secret", "pm@example.com", true, "hash-of-key", 1)
+	if err != nil {
+		t.Fatalf("CreateDemo private: %v", err)
+	}
+	if !priv.Private || priv.AccessKeyHash != "hash-of-key" {
+		t.Errorf("created = %+v, want private with hash", priv)
+	}
+	byName, err := s.DemoByName("secret")
+	if err != nil {
+		t.Fatalf("DemoByName: %v", err)
+	}
+	if !byName.Private || byName.AccessKeyHash != "hash-of-key" {
+		t.Errorf("byName = %+v, want privacy columns", byName)
+	}
+
+	pub, _ := s.CreateDemo("open", "pm@example.com", false, "", 2)
+	if pub.Private || pub.AccessKeyHash != "" {
+		t.Errorf("public created = %+v, want public and keyless", pub)
+	}
+
+	list, err := s.ListDemos()
+	if err != nil {
+		t.Fatalf("ListDemos: %v", err)
+	}
+	for _, row := range list {
+		switch row.Name {
+		case "secret":
+			if !row.Private || row.AccessKeyHash != "hash-of-key" {
+				t.Errorf("list secret = %+v", row)
+			}
+		case "open":
+			if row.Private || row.AccessKeyHash != "" {
+				t.Errorf("list open = %+v", row)
+			}
+		}
+	}
+}
+
+func TestCreateDemoPrivateRequiresKey(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.CreateDemo("secret", "a@b.c", true, "", 1); !errors.Is(err, ErrPrivateKeyNeedsKey) {
+		t.Errorf("private without key err = %v, want ErrPrivateKeyNeedsKey", err)
+	}
+	// A public demo must not keep a key even if one is passed.
+	d, err := s.CreateDemo("open", "a@b.c", false, "stray-hash", 1)
+	if err != nil {
+		t.Fatalf("public CreateDemo: %v", err)
+	}
+	if d.AccessKeyHash != "" {
+		t.Errorf("public demo kept a key hash: %+v", d)
+	}
+}
+
+func TestSetDemoPrivacy(t *testing.T) {
+	s := openTest(t)
+	d, _ := s.CreateDemo("acme", "a@b.c", false, "", 1)
+
+	if err := s.SetDemoPrivacy(d.ID, true, "hash-1", 5); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	got, _ := s.DemoByID(d.ID)
+	if !got.Private || got.AccessKeyHash != "hash-1" || got.UpdatedAt != 5 {
+		t.Errorf("after enable = %+v", got)
+	}
+
+	// Disable clears the hash; repeating the disable is fine.
+	if err := s.SetDemoPrivacy(d.ID, false, "", 6); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	got, _ = s.DemoByID(d.ID)
+	if got.Private || got.AccessKeyHash != "" {
+		t.Errorf("after disable = %+v, want key forgotten", got)
+	}
+	if err := s.SetDemoPrivacy(d.ID, false, "ignored", 7); err != nil {
+		t.Fatalf("re-disable: %v", err)
+	}
+	got, _ = s.DemoByID(d.ID)
+	if got.Private || got.AccessKeyHash != "" {
+		t.Errorf("after re-disable = %+v, key must stay forgotten", got)
+	}
+
+	if err := s.SetDemoPrivacy(d.ID, true, "", 8); !errors.Is(err, ErrPrivateKeyNeedsKey) {
+		t.Errorf("enable without key err = %v, want ErrPrivateKeyNeedsKey", err)
+	}
+	if err := s.SetDemoPrivacy(999999, false, "", 9); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown id err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestTouchDemo(t *testing.T) {
 	s := openTest(t)
-	d, _ := s.CreateDemo("acme", "a@b.c", 1)
+	d, _ := s.CreateDemo("acme", "a@b.c", false, "", 1)
 	if err := s.TouchDemo(d.ID, 99); err != nil {
 		t.Fatalf("TouchDemo: %v", err)
 	}

@@ -70,6 +70,12 @@ type Config struct {
 	GoogleClientSecret string
 	WorkspaceDomain    string // Google Workspace domain — enforced server-side at callback
 
+	// GoogleSuperadminEmails promotes matching Google sign-ins to
+	// superadmins (google auth mode): they may manage any demo. Local user
+	// management stays password-mode-only regardless. Empty = no google
+	// superadmin (demo management is owner-only in that case).
+	GoogleSuperadminEmails []string
+
 	// AdminEmail/AdminPassword bootstrap the superadmin in password mode;
 	// the account is created at boot only if it does not exist yet.
 	AdminEmail    string
@@ -153,6 +159,14 @@ func Load(getenv func(string) string) (Config, error) {
 		req(&cfg.GoogleClientSecret, "GOOGLE_CLIENT_SECRET")
 		req(&cfg.WorkspaceDomain, "GOOGLE_WORKSPACE_DOMAIN")
 		cfg.WorkspaceDomain = strings.ToLower(cfg.WorkspaceDomain)
+		// Optional comma-separated list; every listed Workspace account
+		// can manage any demo. Parsed only in google mode — the variable
+		// is meaningless next to local accounts.
+		for _, e := range strings.Split(getenv("GOOGLE_SUPERADMIN_EMAIL"), ",") {
+			if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+				cfg.GoogleSuperadminEmails = append(cfg.GoogleSuperadminEmails, e)
+			}
+		}
 	} else if cfg.AuthMode == AuthModePassword {
 		// Google credentials are meaningless here and must not be
 		// required; the bootstrap superadmin takes their place.

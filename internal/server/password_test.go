@@ -546,3 +546,145 @@ func TestGoogleSessionCannotManageUsers(t *testing.T) {
 		resp.Body.Close()
 	}
 }
+
+// demoHeaders builds cookie+CSRF(+JSON) headers for a password-mode
+// session; csrfFor is the harness csrf helper over /api/me.
+func (h *passwordHarness) demoHeaders(t *testing.T, session string, jsonBody bool) map[string]string {
+	t.Helper()
+	headers := map[string]string{
+		"Cookie":       auth.CookieName + "=" + session,
+		"X-CSRF-Token": h.csrf(t, session),
+	}
+	if jsonBody {
+		headers["Content-Type"] = "application/json"
+	}
+	return headers
+}
+
+// loginAsUser creates a fresh password user via the superadmin and logs in
+// as them — multi-actor permission tests.
+func (h *passwordHarness) loginAsUser(t *testing.T, adminHeaders map[string]string, email string) string {
+	t.Helper()
+	h.createUser(t, adminHeaders, email, email+"-password-1", store.RoleUser)
+	session, _ := h.login(t, email, email+"-password-1")
+	return session
+}
+
+func TestDemoManagementPermissions(t *testing.T) {
+	h := newPasswordHarness(t)
+	admin, _ := h.login(t, superadminEmail, superadminPassword)
+	adminHeaders := h.demoHeaders(t, admin, true)
+
+	owner := h.loginAsUser(t, adminHeaders, "owner@example.com")
+	stranger := h.loginAsUser(t, adminHeaders, "stranger@example.com")
+
+	// The owner creates a demo.
+	resp := h.do(t, "POST", "/api/demos", strings.NewReader(`{"name":"mine"}`), h.demoHeaders(t, owner, true))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("owner create = %d (body: %s)", resp.StatusCode, readBody(t, resp))
+	}
+	resp.Body.Close()
+
+	strangerHeaders := h.demoHeaders(t, stranger, true)
+
+	// A deploy attempt by the stranger is refused before any upload work.
+	deployBody := strings.NewReader(`{"x":1}`) // body shape irrelevant: 403 comes first
+	resp = h.do(t, "POST", "/api/demos/mine/deploy", deployBody, strangerHeaders)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("stranger deploy = %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Rollback, rename, privacy, delete — all owner/superadmin only.
+	for name, req := range map[string]struct {
+		method string
+		path   string
+		body   string
+	}{
+		"rollback": {"POST", "/api/demos/mine/rollback", ""},
+		"rename":   {"PATCH", "/api/demos/mine", `{"name":"stolen"}`},
+		"privacy":  {"PATCH", "/api/demos/mine", `{"private":true}`},
+		"delete":   {"DELETE", "/api/demos/mine", ""},
+	} {
+		var body io.Reader
+		if req.body != "" {
+			body = strings.NewReader(req.body)
+		}
+		resp := h.do(t, req.method, req.path, body, strangerHeaders)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("stranger %s = %d, want 403 (body: %s)", name, resp.StatusCode, readBody(t, resp))
+		}
+		resp.Body.Close()
+	}
+
+	// The demo survived every refusal under its original name and owner.
+	resp = h.do(t, "GET", "/api/demos", nil, map[string]string{"Cookie": auth.CookieName + "=" + owner})
+	var list struct {
+		Demos []struct {
+			Name      string `json:"name"`
+			CreatedBy string `json:"created_by"`
+			Private   bool   `json:"private"`
+		} `json:"demos"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		t.Fatalf("list decode: %v", err)
+	}
+	resp.Body.Close()
+	found := false
+	for _, d := range list.Demos {
+		if d.Name == "mine" {
+			found = true
+			if d.CreatedBy != "owner@example.com" || d.Private {
+				t.Errorf("demo mutated by refusals: %+v", d)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("demo missing from list after refused mutations")
+	}
+
+	// The owner manages their own demo: privacy on…
+	ownerHeaders := h.demoHeaders(t, owner, true)
+	resp = h.do(t, "PATCH", "/api/demos/mine", strings.NewReader(`{"private":true}`), ownerHeaders)
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"private":true`) {
+		t.Fatalf("owner enable privacy = %d %s", resp.StatusCode, body)
+	}
+	// …the superadmin can manage it too…
+	resp = h.do(t, "PATCH", "/api/demos/mine", strings.NewReader(`{"private":false}`), adminHeaders)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("superadmin disable privacy = %d", resp.StatusCode)
+	}
+	// …and delete it.
+	resp = h.do(t, "DELETE", "/api/demos/mine", nil, h.demoHeaders(t, admin, false))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("superadmin delete = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestRenameResponseCarriesNewName(t *testing.T) {
+	h := newPasswordHarness(t)
+	admin, _ := h.login(t, superadminEmail, superadminPassword)
+	headers := h.demoHeaders(t, admin, true)
+
+	resp := h.do(t, "POST", "/api/demos", strings.NewReader(`{"name":"before"}`), headers)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d", resp.StatusCode)
+	}
+	resp = h.do(t, "PATCH", "/api/demos/before", strings.NewReader(`{"name":"after"}`), headers)
+	body := readBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("rename = %d (body: %s)", resp.StatusCode, body)
+	}
+	var data struct {
+		Demo struct {
+			Name string `json:"name"`
+		} `json:"demo"`
+	}
+	if err := json.Unmarshal([]byte(body), &data); err != nil || data.Demo.Name != "after" {
+		t.Errorf("rename response = %s, want the updated name", body)
+	}
+}

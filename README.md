@@ -11,9 +11,11 @@ One Go binary with embedded SQLite. The binary and systemd service are named
 
 A single listener multiplexed by the `Host` header:
 
-- `demos.example.com` → the control dashboard: Google Workspace OAuth, demo
-  list, zip upload, rollback, rename, delete.
-- `` `<name>.example.com` `` → static serving of that demo's current release.
+- `demos.example.com` → the control dashboard: Google Workspace OAuth (or
+  local password login), demo list, zip upload, rollback, rename, privacy,
+  delete.
+- `` `<name>.example.com` `` → static serving of that demo's current release —
+  behind the access-key page when the demo is private.
 - anything else → a generic 404.
 
 ```mermaid
@@ -55,11 +57,34 @@ deep links work.
 
 - Sign-in is Google OAuth restricted to your Google Workspace domain; both
   the `hd` claim and the email domain are verified server-side.
+  `DEMOCTL_AUTH_MODE=password` switches to local email/password logins with
+  superadmin-managed accounts instead.
 - The session cookie is host-only on the control host — demo sites are
   cross-origin and never see it.
 - Every mutating request carries a per-session CSRF token.
-- One role: any workspace member can manage any demo. Every action lands in
-  an append-only JSONL audit log tied to the actor's Google identity.
+- Roles: any signed-in member can create demos and view the list; managing a
+  demo — deploy, rollback, rename, privacy, delete — is limited to its
+  creator or a superadmin. A superadmin is a local account with the
+  superadmin role (password mode) or a `GOOGLE_SUPERADMIN_EMAIL` match
+  (google mode). Every action lands in an append-only JSONL audit log tied
+  to the actor's identity.
+
+## Private demos
+
+Privacy is per demo. The owner (or a superadmin) toggles it when creating
+the demo or later from its page; the server generates the access key and
+shows it exactly once — only a hash is stored, so a lost key is replaced by
+rotating, not recovered.
+
+- A private demo's host answers with a common access page (no demo content,
+  `noindex`/`no-store`) until the visitor submits the correct key.
+- The correct key issues a host-only 7-day cookie scoped to that demo host;
+  deep links bounce to the page and return after unlocking.
+- Rotating the key immediately locks out every previously issued cookie.
+- Making the demo public forgets the key and restores normal public
+  caching. Public demos are untouched by the gate.
+- Key checks are constant-time, hashed at rest, rate-limited, and never
+  appear in logs, the audit trail, or any API response after issue.
 
 ## Quick start
 

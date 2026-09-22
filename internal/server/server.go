@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"democtl/internal/audit"
@@ -33,6 +34,16 @@ type Server struct {
 	Uploads *upload.Store
 	Auth    *auth.Authenticator
 	Web     fs.FS // embedded dashboard SPA (web.Dist())
+	// SecureCookie sets the Secure attribute on the demo-host access
+	// cookie, mirroring auth.Deps.SecureCookie for the session cookie.
+	// Production wiring must set true (behind Zoraxy TLS); tests false.
+	SecureCookie bool
+
+	// Access-key verify rate limiter state (gate.go). Guarded by mu;
+	// lazily initialized so every existing construction site keeps
+	// working.
+	gateMu      sync.Mutex
+	gateWindows map[string]gateWindow
 }
 
 // Handler builds the full host-multiplexing handler.
@@ -45,14 +56,17 @@ func (s *Server) Handler() http.Handler {
 		w.Write([]byte("ok\n"))
 	})
 
+	// Everything else on the domain is a potential demo site; serving
+	// resolves via sqlite and 404s generically for unknown hosts. The
+	// privacy gate wraps it: private demos answer with the access page
+	// until the visitor holds a gate cookie (gate.go).
+	demoStatic := &serving.Server{BaseDomain: s.Cfg.BaseDomain, Resolve: s.resolveDemoDir}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if hostOnly(r.Host) == s.Cfg.ControlHost {
 			s.controlMux().ServeHTTP(w, r)
 			return
 		}
-		// Everything else on the domain is a potential demo site; serving
-		// resolves via sqlite and 404s generically for unknown hosts.
-		(&serving.Server{BaseDomain: s.Cfg.BaseDomain, Resolve: s.resolveDemoDir}).ServeHTTP(w, r)
+		s.demoGate(demoStatic).ServeHTTP(w, r)
 	}))
 
 	return mux
@@ -90,7 +104,7 @@ func (s *Server) controlMux() http.Handler {
 	mux.HandleFunc("POST /api/demos", s.Auth.RequireSession(s.requireCSRF(s.handleCreateDemo)))
 	mux.HandleFunc("POST /api/demos/{name}/deploy", s.Auth.RequireSession(s.requireCSRF(s.handleDeploy)))
 	mux.HandleFunc("POST /api/demos/{name}/rollback", s.Auth.RequireSession(s.requireCSRF(s.handleRollback)))
-	mux.HandleFunc("PATCH /api/demos/{name}", s.Auth.RequireSession(s.requireCSRF(s.handleRename)))
+	mux.HandleFunc("PATCH /api/demos/{name}", s.Auth.RequireSession(s.requireCSRF(s.handleUpdateDemo)))
 	mux.HandleFunc("DELETE /api/demos/{name}", s.Auth.RequireSession(s.requireCSRF(s.handleDelete)))
 	// User management is superadmin-only (password mode): session, then
 	// role; mutations additionally carry the CSRF token like every other
@@ -189,6 +203,7 @@ type demoJSON struct {
 	CreatedBy    string       `json:"created_by"`
 	CreatedAt    int64        `json:"created_at"`
 	UpdatedAt    int64        `json:"updated_at"`
+	Private      bool         `json:"private"`
 	LastRelease  *releaseJSON `json:"last_release"`
 	ReleaseCount int64        `json:"release_count"`
 }
@@ -196,7 +211,7 @@ type demoJSON struct {
 func demoToJSON(d store.DemoWithLatest) demoJSON {
 	out := demoJSON{
 		Name: d.Name, CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
-		ReleaseCount: d.ReleaseCount,
+		Private: d.Private, ReleaseCount: d.ReleaseCount,
 	}
 	if d.LastRelease != nil {
 		out.LastRelease = &releaseJSON{
@@ -226,7 +241,8 @@ func (s *Server) handleListDemos(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleCreateDemo(w http.ResponseWriter, r *http.Request) {
 	sess, _ := auth.FromContext(r.Context())
 	var body struct {
-		Name string `json:"name"`
+		Name    string `json:"name"`
+		Private bool   `json:"private"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
@@ -240,7 +256,20 @@ func (s *Server) handleCreateDemo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name must be 2-32 chars: lowercase letters, digits, hyphens")
 		return
 	}
-	d, err := s.DB.CreateDemo(body.Name, sess.Actor(), time.Now().UTC().Unix())
+	// A private demo gets a server-generated access key up front; the
+	// plaintext is returned exactly once, below, and only the hash is
+	// stored.
+	var accessKey, keyHash string
+	if body.Private {
+		key, hash, err := generateAccessKey()
+		if err != nil {
+			slog.Error("generate access key", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		accessKey, keyHash = key, hash
+	}
+	d, err := s.DB.CreateDemo(body.Name, sess.Actor(), body.Private, keyHash, time.Now().UTC().Unix())
 	if errors.Is(err, store.ErrNameTaken) {
 		writeErr(w, http.StatusConflict, "name already taken")
 		return
@@ -250,8 +279,13 @@ func (s *Server) handleCreateDemo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.Audit.MustEvent(sess.Actor(), "demo.create", body.Name, nil)
-	writeJSON(w, http.StatusCreated, map[string]any{"demo": demoToJSON(store.DemoWithLatest{Demo: d})})
+	s.Audit.MustEvent(sess.Actor(), "demo.create", body.Name, map[string]any{"private": body.Private})
+	resp := map[string]any{"demo": demoToJSON(store.DemoWithLatest{Demo: d})}
+	if accessKey != "" {
+		// The plaintext key rides exactly one response — this one.
+		resp["access_key"] = accessKey
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) demoFromPath(w http.ResponseWriter, r *http.Request) (store.Demo, bool) {
@@ -268,10 +302,31 @@ func (s *Server) demoFromPath(w http.ResponseWriter, r *http.Request) (store.Dem
 	return demo, true
 }
 
+// canManageDemo reports whether the session may mutate the demo: its
+// creator, or a superadmin (a local superadmin in password mode, or a
+// GOOGLE_SUPERADMIN_EMAIL match in google mode). Creating demos and
+// viewing the list stay open to every authenticated user.
+func (s *Server) canManageDemo(sess auth.Session, demo store.Demo) bool {
+	return sess.IsSuperadmin() || sess.Actor() == demo.CreatedBy
+}
+
+// requireManageDemo writes the 403 envelope unless the session may manage
+// the demo; handlers call it right after resolving the demo.
+func (s *Server) requireManageDemo(w http.ResponseWriter, sess auth.Session, demo store.Demo) bool {
+	if !s.canManageDemo(sess, demo) {
+		writeErr(w, http.StatusForbidden, "only the demo owner or a superadmin can manage this demo")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	sess, _ := auth.FromContext(r.Context())
 	demo, ok := s.demoFromPath(w, r)
 	if !ok {
+		return
+	}
+	if !s.requireManageDemo(w, sess, demo) {
 		return
 	}
 	// The whole multipart body is bounded by the zip cap plus form overhead;
@@ -332,6 +387,9 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.requireManageDemo(w, sess, demo) {
+		return
+	}
 	rels, err := s.DB.ReleasesFor(demo.ID)
 	if err != nil {
 		slog.Error("list releases", "err", err)
@@ -355,50 +413,134 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+// handleUpdateDemo is PATCH /api/demos/{name}: rename, privacy toggle, or
+// key rotation. Management is owner-or-superadmin for every branch
+// (requireManageDemo). Pointers distinguish "absent" from "false".
+// Semantics: private=true enables the gate and mints a fresh key (400 if
+// already private — rotating is rotate_key's job, so an idempotent replay
+// can never silently invalidate shared keys); private=false disables and
+// forgets the key; rotate_key=true mints a new key for an already-private
+// demo. Enabling or rotating returns the plaintext access_key exactly
+// once; only the sha256 lands in the database.
+func (s *Server) handleUpdateDemo(w http.ResponseWriter, r *http.Request) {
 	sess, _ := auth.FromContext(r.Context())
 	demo, ok := s.demoFromPath(w, r)
 	if !ok {
 		return
 	}
+	if !s.requireManageDemo(w, sess, demo) {
+		return
+	}
 	var body struct {
-		Name string `json:"name"`
+		Name      *string `json:"name"`
+		Private   *bool   `json:"private"`
+		RotateKey *bool   `json:"rotate_key"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := demonames.Check(body.Name); err != nil {
-		if errors.Is(err, demonames.ErrReserved) {
-			writeErr(w, http.StatusConflict, "name is reserved")
-			return
-		}
-		writeErr(w, http.StatusBadRequest, "name must be 2-32 chars: lowercase letters, digits, hyphens")
+	wantRotate := body.RotateKey != nil && *body.RotateKey
+	if body.Name == nil && body.Private == nil && !wantRotate {
+		writeErr(w, http.StatusBadRequest, "provide a field to update: name, private, or rotate_key")
+		return
+	}
+	if body.Name != nil && (body.Private != nil || wantRotate) {
+		writeErr(w, http.StatusBadRequest, "rename and privacy changes must be sent separately")
 		return
 	}
 	now := time.Now().UTC().Unix()
-	if err := s.DB.RenameDemo(demo.ID, body.Name, now); err != nil {
-		if errors.Is(err, store.ErrNameTaken) {
-			writeErr(w, http.StatusConflict, "name already taken")
+
+	if body.Name != nil {
+		if err := demonames.Check(*body.Name); err != nil {
+			if errors.Is(err, demonames.ErrReserved) {
+				writeErr(w, http.StatusConflict, "name is reserved")
+				return
+			}
+			writeErr(w, http.StatusBadRequest, "name must be 2-32 chars: lowercase letters, digits, hyphens")
 			return
 		}
-		slog.Error("rename demo", "err", err)
-		writeErr(w, http.StatusInternalServerError, "internal error")
+		if err := s.DB.RenameDemo(demo.ID, *body.Name, now); err != nil {
+			if errors.Is(err, store.ErrNameTaken) {
+				writeErr(w, http.StatusConflict, "name already taken")
+				return
+			}
+			slog.Error("rename demo", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		// The on-disk parent dir is named for the label; the relative
+		// current symlink keeps working under the new name untouched.
+		if err := s.Uploads.RenameDemoDir(demo.Name, *body.Name); err != nil {
+			slog.Error("rename demo dir", "err", err)
+		}
+		s.Audit.MustEvent(sess.Actor(), "demo.rename", *body.Name, map[string]any{"from": demo.Name})
+		updated := demo
+		updated.Name = *body.Name
+		updated.UpdatedAt = now
+		writeJSON(w, http.StatusOK, map[string]any{"demo": demoToJSON(store.DemoWithLatest{Demo: updated})})
 		return
 	}
-	// The on-disk parent dir is named for the label; the relative current
-	// symlink keeps working under the new name untouched.
-	if err := s.Uploads.RenameDemoDir(demo.Name, body.Name); err != nil {
-		slog.Error("rename demo dir", "err", err)
+
+	// Privacy branch: enable / disable / rotate.
+	var (
+		enable  = body.Private != nil && *body.Private
+		disable = body.Private != nil && !*body.Private
+	)
+	switch {
+	case disable && wantRotate:
+		writeErr(w, http.StatusBadRequest, "an access key cannot be rotated on a public demo")
+		return
+	case enable && demo.Private:
+		writeErr(w, http.StatusConflict, "demo is already private — use rotate_key to change the key")
+		return
+	case wantRotate && !demo.Private:
+		writeErr(w, http.StatusBadRequest, "demo is not private — set private to true first")
+		return
 	}
-	s.Audit.MustEvent(sess.Actor(), "demo.rename", body.Name, map[string]any{"from": demo.Name})
-	writeJSON(w, http.StatusOK, map[string]any{"demo": demoToJSON(store.DemoWithLatest{Demo: demo})})
+	var (
+		resp     = map[string]any{}
+		rotated  = wantRotate
+		privMode = demo.Private
+	)
+	if enable || wantRotate {
+		key, hash, err := generateAccessKey()
+		if err != nil {
+			slog.Error("generate access key", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if err := s.DB.SetDemoPrivacy(demo.ID, true, hash, now); err != nil {
+			slog.Error("set demo privacy", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		resp["access_key"] = key // plaintext exactly once
+		privMode = true
+	} else { // disable
+		if err := s.DB.SetDemoPrivacy(demo.ID, false, "", now); err != nil {
+			slog.Error("set demo privacy", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		privMode = false
+	}
+	s.Audit.MustEvent(sess.Actor(), "demo.privacy", demo.Name, map[string]any{"private": privMode, "rotated": rotated})
+	updated := demo
+	updated.Private = privMode
+	updated.AccessKeyHash = ""
+	updated.UpdatedAt = now
+	resp["demo"] = demoToJSON(store.DemoWithLatest{Demo: updated})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	sess, _ := auth.FromContext(r.Context())
 	demo, ok := s.demoFromPath(w, r)
 	if !ok {
+		return
+	}
+	if !s.requireManageDemo(w, sess, demo) {
 		return
 	}
 	// Files first, then rows: a failed DB delete leaves visible files (the

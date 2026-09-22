@@ -16,11 +16,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// ErrNotFound and ErrNameTaken are the sentinel errors call sites branch
-// on; everything else is a wrapped driver error.
+// ErrNotFound, ErrNameTaken and ErrPrivateKeyNeedsKey are the sentinel
+// errors call sites branch on; everything else is a wrapped driver error.
 var (
-	ErrNotFound  = errors.New("store: not found")
-	ErrNameTaken = errors.New("store: name taken")
+	ErrNotFound            = errors.New("store: not found")
+	ErrNameTaken           = errors.New("store: name taken")
+	ErrPrivateKeyNeedsKey  = errors.New("store: private demo requires an access key")
 )
 
 //go:embed migrations/*.sql
@@ -114,6 +115,10 @@ type Demo struct {
 	CreatedBy string
 	CreatedAt int64
 	UpdatedAt int64
+	// Private gates the demo's host behind the access-key page; the key is
+	// stored as AccessKeyHash (sha256 hex) and must be empty when public.
+	Private       bool
+	AccessKeyHash string
 }
 
 // Release is one uploaded build of a demo.
@@ -149,11 +154,21 @@ func wrapNoRows(err error) error {
 	return err
 }
 
-// CreateDemo inserts a demo; ErrNameTaken on the unique violation.
-func (s *Store) CreateDemo(name, createdBy string, now int64) (Demo, error) {
+// CreateDemo inserts a demo; ErrNameTaken on the unique violation. A
+// private demo must carry a key hash (defense in depth — the handler
+// generates and validates the key first) and returns ErrPrivateKeyNeedsKey
+// otherwise.
+func (s *Store) CreateDemo(name, createdBy string, private bool, keyHash string, now int64) (Demo, error) {
+	if private && keyHash == "" {
+		return Demo{}, ErrPrivateKeyNeedsKey
+	}
+	if !private {
+		keyHash = ""
+	}
 	res, err := s.db.Exec(
-		`INSERT INTO demos (name, created_by, created_at, updated_at) VALUES (?, ?, ?, ?)`,
-		name, createdBy, now, now,
+		`INSERT INTO demos (name, created_by, private, access_key_hash, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		name, createdBy, private, keyHash, now, now,
 	)
 	if isUnique(err) {
 		return Demo{}, ErrNameTaken
@@ -165,7 +180,31 @@ func (s *Store) CreateDemo(name, createdBy string, now int64) (Demo, error) {
 	if err != nil {
 		return Demo{}, fmt.Errorf("store: create demo id: %w", err)
 	}
-	return Demo{ID: id, Name: name, CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now}, nil
+	return Demo{ID: id, Name: name, CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now,
+		Private: private, AccessKeyHash: keyHash}, nil
+}
+
+// SetDemoPrivacy changes the gate state. private=true requires a non-empty
+// keyHash; private=false always clears the stored hash — disabling the gate
+// forgets the key, and old gate cookies stop validating against anything.
+func (s *Store) SetDemoPrivacy(id int64, private bool, keyHash string, now int64) error {
+	if private && keyHash == "" {
+		return ErrPrivateKeyNeedsKey
+	}
+	if !private {
+		keyHash = ""
+	}
+	res, err := s.db.Exec(
+		`UPDATE demos SET private = ?, access_key_hash = ?, updated_at = ? WHERE id = ?`,
+		private, keyHash, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("store: set demo privacy: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // RenameDemo changes only the subdomain label (docs/demos.md: the only
@@ -202,13 +241,16 @@ func (s *Store) DeleteDemo(id int64) error {
 	return nil
 }
 
-const demoCols = `id, name, created_by, created_at, updated_at`
+const demoCols = `id, name, created_by, created_at, updated_at, private, access_key_hash`
 
 func scanDemo(row interface{ Scan(...any) error }) (Demo, error) {
 	var d Demo
-	if err := row.Scan(&d.ID, &d.Name, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt); err != nil {
+	var private int64
+	if err := row.Scan(&d.ID, &d.Name, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+		&private, &d.AccessKeyHash); err != nil {
 		return Demo{}, err
 	}
+	d.Private = private == 1
 	return d, nil
 }
 
@@ -228,7 +270,7 @@ func (s *Store) DemoByID(id int64) (Demo, error) {
 // by name — the dashboard's live list.
 func (s *Store) ListDemos() ([]DemoWithLatest, error) {
 	rows, err := s.db.Query(`
-		SELECT d.id, d.name, d.created_by, d.created_at, d.updated_at,
+		SELECT d.id, d.name, d.created_by, d.created_at, d.updated_at, d.private, d.access_key_hash,
 		       r.id, r.dir, r.uploaded_by, r.uploaded_at, r.size_bytes, r.file_count,
 		       (SELECT COUNT(*) FROM releases rc WHERE rc.demo_id = d.id)
 		FROM demos d
@@ -245,12 +287,14 @@ func (s *Store) ListDemos() ([]DemoWithLatest, error) {
 	var out []DemoWithLatest
 	for rows.Next() {
 		var d DemoWithLatest
+		var private int64
 		var relID, relUploadedAt, relSize, relFiles sql.NullInt64
 		var relDir, relBy sql.NullString
-		if err := rows.Scan(&d.ID, &d.Name, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
+		if err := rows.Scan(&d.ID, &d.Name, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt, &private, &d.AccessKeyHash,
 			&relID, &relDir, &relBy, &relUploadedAt, &relSize, &relFiles, &d.ReleaseCount); err != nil {
 			return nil, fmt.Errorf("store: list demos scan: %w", err)
 		}
+		d.Private = private == 1
 		if relID.Valid {
 			d.LastRelease = &Release{
 				ID: relID.Int64, DemoID: d.ID, Dir: relDir.String, UploadedBy: relBy.String,

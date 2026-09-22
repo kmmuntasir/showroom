@@ -122,15 +122,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // labelFromHost extracts the single-label subdomain for BaseDomain.
-// Multi-level subdomains (label containing ".") are out of scope by design —
-// the Zoraxy wildcard route only ever produces one label (docs/demos.md
-// §Architecture host routing).
 func (s *Server) labelFromHost(host string) (string, bool) {
+	return LabelFromHost(host, s.BaseDomain)
+}
+
+// LabelFromHost extracts the single-label subdomain of baseDomain from a
+// Host header (lowercased, port stripped); ok=false unless the host is
+// exactly <label>.<baseDomain> with a single dotless label. Multi-level
+// subdomains (label containing ".") are out of scope by design — the
+// Zoraxy wildcard route only ever produces one label (docs/demos.md
+// §Architecture host routing). The server package's privacy gate uses the
+// same parse to look demos up before serving.
+func LabelFromHost(host, baseDomain string) (string, bool) {
 	host = strings.ToLower(host)
 	if i := strings.LastIndexByte(host, ':'); i >= 0 {
 		host = host[:i]
 	}
-	suffix := "." + strings.ToLower(s.BaseDomain)
+	suffix := "." + strings.ToLower(baseDomain)
 	if !strings.HasSuffix(host, suffix) {
 		return "", false
 	}

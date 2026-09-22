@@ -234,3 +234,38 @@ func TestGoogleSessionHasNoRole(t *testing.T) {
 		t.Errorf("google sess role/user = %q/%d, want empty/0", sess.Role, sess.UserID)
 	}
 }
+
+func TestGoogleSuperadminByEmail(t *testing.T) {
+	// goodUser's email is listed in GOOGLE_SUPERADMIN_EMAILS — the session
+	// must carry superadmin both at issue and on later re-resolution.
+	a, _, _ := newAuth(t, goodUser, func(d *Deps) {
+		d.Cfg.GoogleSuperadminEmails = []string{"someone-else@example.com", goodUser.Email}
+	})
+	sess, raw := login(t, a)
+	if !sess.IsSuperadmin() {
+		t.Error("listed google session is not superadmin")
+	}
+	resolved, ok := a.Session(withSessionCookie(httptest.NewRequest("GET", "/", nil), raw))
+	if !ok || !resolved.IsSuperadmin() {
+		t.Errorf("re-resolved google session superadmin = %v, ok = %v", resolved.IsSuperadmin(), ok)
+	}
+	if resolved.Role != "" || resolved.UserID != 0 {
+		t.Errorf("google superadmin session gained role/user: %+v", resolved)
+	}
+
+	// Case-insensitive match (config lowercases at load; emails compare lowered).
+	a2, _, _ := newAuth(t, goodUser, func(d *Deps) {
+		d.Cfg.GoogleSuperadminEmails = []string{"PM@EXAMPLE.COM"}
+	})
+	sess2, _ := login(t, a2)
+	if !sess2.IsSuperadmin() {
+		t.Error("case-differing google email not treated as superadmin")
+	}
+
+	// Unlisted: no superadmin (the default state).
+	a3, _, _ := newAuth(t, goodUser, nil)
+	sess3, _ := login(t, a3)
+	if sess3.IsSuperadmin() {
+		t.Error("unlisted google session reports superadmin")
+	}
+}

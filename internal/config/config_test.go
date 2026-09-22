@@ -193,3 +193,32 @@ func TestLoadGoogleModeStillRequiresGoogle(t *testing.T) {
 		t.Error("deleting GOOGLE_CLIENT_ID in google mode: want error, got nil")
 	}
 }
+
+func TestLoadGoogleSuperadminEmails(t *testing.T) {
+	env := testEnv()
+	env["GOOGLE_SUPERADMIN_EMAIL"] = " PM@Example.COM , other@example.com ,, "
+	cfg, err := Load(loader(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"pm@example.com", "other@example.com"}
+	if len(cfg.GoogleSuperadminEmails) != len(want) {
+		t.Fatalf("list = %v, want %v", cfg.GoogleSuperadminEmails, want)
+	}
+	for i, e := range want {
+		if cfg.GoogleSuperadminEmails[i] != e {
+			t.Errorf("list[%d] = %q, want %q", i, cfg.GoogleSuperadminEmails[i], e)
+		}
+	}
+
+	// Password mode ignores the variable entirely.
+	penv := passwordEnv()
+	penv["GOOGLE_SUPERADMIN_EMAIL"] = "pm@example.com"
+	pcfg, err := Load(loader(penv))
+	if err != nil {
+		t.Fatalf("password-mode Load: %v", err)
+	}
+	if len(pcfg.GoogleSuperadminEmails) != 0 {
+		t.Errorf("password mode parsed google superadmins: %v", pcfg.GoogleSuperadminEmails)
+	}
+}

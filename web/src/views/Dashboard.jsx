@@ -12,11 +12,13 @@ import {
   Link,
   Spinner,
   Stack,
+  Switch,
   Table,
   Text,
 } from '@chakra-ui/react'
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import AccessKeyBox from '../components/AccessKeyBox.jsx'
 import ErrorAlert from '../components/ErrorAlert.jsx'
 import { toaster } from '../components/toaster.jsx'
 import { humanSize, timeAgoOrDate } from '../format.js'
@@ -28,11 +30,13 @@ const liveUrl = (name) => `https://${name}.example.com`
 // Live demo list + create form (docs/demos.md §Control dashboard UI). The
 // list is API state only — nothing is derived or cached client-side.
 // Superadmins (password mode) additionally get the user management panel.
-export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDemo, onRefresh, onSignOut }) {
+export default function Dashboard({ email, isSuperadmin, authMode, demos, error, onOpenDemo, onRefresh, onSignOut }) {
   const [name, setName] = useState('')
   const [validationError, setValidationError] = useState(null)
   const [createError, setCreateError] = useState(null)
   const [creating, setCreating] = useState(false)
+  const [isPrivate, setIsPrivate] = useState(false)
+  const [issuedKey, setIssuedKey] = useState(null)
 
   useEffect(() => {
     onRefresh()
@@ -41,6 +45,7 @@ export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDem
   const submitCreate = async (event) => {
     event.preventDefault()
     setCreateError(null)
+    setIssuedKey(null)
 
     const trimmed = name.trim()
     if (!isValidDemoName(trimmed)) {
@@ -50,12 +55,15 @@ export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDem
     setValidationError(null)
     setCreating(true)
     try {
-      await api.post('/api/demos', { name: trimmed })
+      const data = await api.post('/api/demos', { name: trimmed, ...(isPrivate ? { private: true } : {}) })
       toaster.success({
         title: 'Demo created',
         description: `${liveUrl(trimmed)} is ready for its first deploy.`,
       })
+      // A private demo's access key rides this response exactly once.
+      if (data?.access_key) setIssuedKey(data.access_key)
       setName('')
+      setIsPrivate(false)
       onRefresh()
     } catch (createFailure) {
       // 409 name taken / reserved — surface inline (docs/demos.md HTTP surface).
@@ -106,6 +114,7 @@ export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDem
               <Table.Header>
                 <Table.Row bg="bg.subtle">
                   <Table.ColumnHeader>Name</Table.ColumnHeader>
+                  <Table.ColumnHeader>Created by</Table.ColumnHeader>
                   <Table.ColumnHeader>Live URL</Table.ColumnHeader>
                   <Table.ColumnHeader>Last deploy</Table.ColumnHeader>
                   <Table.ColumnHeader textAlign="end">Size</Table.ColumnHeader>
@@ -116,16 +125,24 @@ export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDem
                 {demos.map((demo) => (
                   <Table.Row key={demo.name}>
                     <Table.Cell>
-                      <Button
-                        variant="plain"
-                        size="sm"
-                        colorPalette="teal"
-                        px={0}
-                        onClick={() => onOpenDemo(demo)}
-                      >
-                        {demo.name}
-                      </Button>
+                      <HStack gap={2}>
+                        <Button
+                          variant="plain"
+                          size="sm"
+                          colorPalette="teal"
+                          px={0}
+                          onClick={() => onOpenDemo(demo)}
+                        >
+                          {demo.name}
+                        </Button>
+                        {demo.private ? (
+                          <Badge colorPalette="orange" variant="subtle">
+                            Private
+                          </Badge>
+                        ) : null}
+                      </HStack>
                     </Table.Cell>
+                    <Table.Cell>{demo.created_by}</Table.Cell>
                     <Table.Cell>
                       <Link
                         href={liveUrl(demo.name)}
@@ -181,16 +198,33 @@ export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDem
               <Field.HelperText>{NAME_HINT}</Field.HelperText>
               {validationError ? <Field.ErrorText>{validationError}</Field.ErrorText> : null}
             </Field.Root>
+            <Field.Root maxW="lg">
+              <Switch.Root
+                checked={isPrivate}
+                onCheckedChange={(details) => setIsPrivate(details.checked)}
+              >
+                <Switch.HiddenInput />
+                <Switch.Control>
+                  <Switch.Thumb />
+                </Switch.Control>
+                <Switch.Label>Private — visitors need an access key</Switch.Label>
+              </Switch.Root>
+              <Field.HelperText>
+                A private demo shows an access page instead of the site. The key is generated when
+                you create the demo and shown exactly once.
+              </Field.HelperText>
+            </Field.Root>
             <Button type="submit" colorPalette="teal" loading={creating} alignSelf="flex-start">
               Create
             </Button>
+            {issuedKey ? <AccessKeyBox accessKey={issuedKey} /> : null}
             {createError ? (
               <ErrorAlert title={`Could not create "${name.trim()}"`} description={createError} />
             ) : null}
           </Stack>
         </Box>
 
-        {isSuperadmin ? <Users /> : null}
+        {isSuperadmin && authMode === 'password' ? <Users /> : null}
       </Stack>
     </Container>
   )

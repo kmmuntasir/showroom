@@ -91,6 +91,9 @@ func run() error {
 	authn := auth.New(auth.Deps{
 		Cfg:      cfg,
 		Sessions: st,
+		// The control host is only ever reached through Zoraxy TLS
+		// termination, so both cookies can carry Secure.
+		SecureCookie: true,
 	})
 
 	srv := &server.Server{
@@ -100,6 +103,8 @@ func run() error {
 		Uploads: uploads,
 		Auth:    authn,
 		Web:     web.Dist(),
+		// Mirrors auth.Deps.SecureCookie for the demo-host access cookie.
+		SecureCookie: true,
 	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,

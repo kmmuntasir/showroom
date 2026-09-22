@@ -19,10 +19,16 @@ import (
 )
 
 // requireSuperadmin gates a handler on a superadmin session. It runs after
-// RequireSession, so the session is always in context here. Google sessions
-// never carry a role and are always refused.
+// RequireSession, so the session is always in context here. Local user
+// management exists only in password auth mode: a GOOGLE_SUPERADMIN_EMAIL
+// match is a superadmin for demo management but never for this surface —
+// there are no local accounts behind a Google deployment to manage.
 func (s *Server) requireSuperadmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if s.Cfg.AuthMode != config.AuthModePassword {
+			writeErr(w, http.StatusForbidden, "user management is available in password auth mode only")
+			return
+		}
 		sess, _ := auth.FromContext(r.Context())
 		if !sess.IsSuperadmin() {
 			writeErr(w, http.StatusForbidden, "superadmin only")

@@ -77,6 +77,11 @@ type Session struct {
 	UserID      int64  // owning local user; 0 for Google sessions
 	Email       string // actor email in both modes
 	Role        string // store.RoleSuperadmin / store.RoleUser; "" for Google sessions
+	// Superadmin is computed at construction: a local superadmin role
+	// (password mode) or a configured GOOGLE_SUPERADMIN_EMAIL match
+	// (google mode). It gates demo management in both modes and user
+	// management in password mode.
+	Superadmin bool
 }
 
 // Actor returns the email audit entries and created_by fields attribute to
@@ -89,10 +94,27 @@ func (s Session) Actor() string {
 	return s.GoogleEmail
 }
 
-// IsSuperadmin reports whether the session may manage users (password mode
-// only — Google sessions never carry a role).
+// IsSuperadmin reports whether the session may manage any demo (both auth
+// modes) and local users (password mode only — the /api/users surface is
+// additionally gated on the auth mode itself).
 func (s Session) IsSuperadmin() bool {
-	return s.UserID != 0 && s.Role == store.RoleSuperadmin
+	return s.Superadmin
+}
+
+// isGoogleSuperadmin reports whether a Google sign-in email is on the
+// configured superadmin list (config.GoogleSuperadminEmails, already
+// lowercased at load).
+func (a *Authenticator) isGoogleSuperadmin(email string) bool {
+	if email == "" {
+		return false
+	}
+	email = strings.ToLower(email)
+	for _, listed := range a.cfg.GoogleSuperadminEmails {
+		if strings.ToLower(listed) == email {
+			return true
+		}
+	}
+	return false
 }
 
 // Deps wires the authenticator. Zero values pick the production defaults;
@@ -230,6 +252,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) (Sessio
 		GoogleSub:   id.Sub,
 		GoogleEmail: id.Email,
 		Email:       id.Email,
+		Superadmin:  a.isGoogleSuperadmin(id.Email),
 	}
 	if err := a.sessions.CreateSession(store.Session{
 		IDHash:      sess.IDHash,
@@ -398,6 +421,9 @@ func (a *Authenticator) Session(r *http.Request) (Session, bool) {
 		sess.UserID = user.ID
 		sess.Email = user.Email
 		sess.Role = user.Role
+		sess.Superadmin = user.Role == store.RoleSuperadmin
+	} else {
+		sess.Superadmin = a.isGoogleSuperadmin(row.GoogleEmail)
 	}
 	return sess, true
 }

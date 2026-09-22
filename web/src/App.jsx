@@ -113,6 +113,8 @@ export default function App() {
     return (
       <DemoDetail
         demo={viewedDemo}
+        email={auth.email}
+        isSuperadmin={auth.isSuperadmin}
         refreshing={demos === null}
         onBack={() => setView(null)}
         onRenamed={(renamedTo) => setView({ name: renamedTo, demo: { ...viewedDemo, name: renamedTo } })}
@@ -125,6 +127,7 @@ export default function App() {
     <Dashboard
       email={auth.email}
       isSuperadmin={auth.isSuperadmin}
+      authMode={auth.authMode}
       demos={demos}
       error={demosError}
       onOpenDemo={(demo) => setView({ name: demo.name, demo })}

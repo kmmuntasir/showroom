@@ -39,6 +39,12 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) *harness {
+	return newHarnessWithCfg(t, nil)
+}
+
+// newHarnessWithCfg is newHarness with a hook to mutate the config before
+// wiring (e.g. GOOGLE_SUPERADMIN_EMAILS) — the only knob tests vary.
+func newHarnessWithCfg(t *testing.T, mutate func(*config.Config)) *harness {
 	t.Helper()
 	dir := t.TempDir()
 
@@ -71,6 +77,9 @@ func newHarness(t *testing.T) *harness {
 		GoogleClientSecret: "csecret",
 		WorkspaceDomain:    "example.com",
 		Limits:             config.DefaultLimits(),
+	}
+	if mutate != nil {
+		mutate(&cfg)
 	}
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
