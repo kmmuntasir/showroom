@@ -199,6 +199,9 @@ func TestPasswordAuthInfoIsPublic(t *testing.T) {
 	if !strings.Contains(body, `"auth_mode":"password"`) {
 		t.Errorf("body = %s, want auth_mode password", body)
 	}
+	if !strings.Contains(body, `"base_domain":"example.com"`) {
+		t.Errorf("body = %s, want base_domain example.com", body)
+	}
 }
 
 func TestPasswordLoginRoundTrip(t *testing.T) {

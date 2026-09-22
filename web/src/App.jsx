@@ -14,7 +14,7 @@ import Login from './views/Login.jsx'
 // GET /api/auth-info when logged out, and the Login view renders the
 // matching form.
 export default function App() {
-  const [auth, setAuth] = useState({ status: 'loading', email: null, role: null, isSuperadmin: false, authMode: 'google' })
+  const [auth, setAuth] = useState({ status: 'loading', email: null, role: null, isSuperadmin: false, authMode: 'google', baseDomain: null })
   const [bootError, setBootError] = useState(null)
   const [demos, setDemos] = useState(null)
   const [demosError, setDemosError] = useState(null)
@@ -43,20 +43,23 @@ export default function App() {
           role: me.role ?? null,
           isSuperadmin: me.is_superadmin === true,
           authMode: me.auth_mode ?? 'google',
+          baseDomain: me.base_domain ?? null,
         })
       } catch (bootFailure) {
         if (cancelled) return
         // Logged out: learn the active auth mode so the login view renders
         // the right form. A failed probe keeps the google default.
         let authMode = 'google'
+        let baseDomain = null
         try {
           const info = await api.get('/api/auth-info')
           if (info?.auth_mode === 'password') authMode = 'password'
+          if (info?.base_domain) baseDomain = info.base_domain
         } catch {
           // /api/auth-info unreachable — the login attempt will surface it.
         }
         if (cancelled) return
-        setAuth({ status: 'login', email: null, role: null, isSuperadmin: false, authMode })
+        setAuth({ status: 'login', email: null, role: null, isSuperadmin: false, authMode, baseDomain })
         if (bootFailure.status !== 401) setBootError(bootFailure.message)
       }
     }
@@ -102,7 +105,7 @@ export default function App() {
   }
 
   if (auth.status === 'login') {
-    return <Login bootError={bootError} authMode={auth.authMode} onPasswordLogin={signInWithPassword} />
+    return <Login bootError={bootError} authMode={auth.authMode} baseDomain={auth.baseDomain} onPasswordLogin={signInWithPassword} />
   }
 
   const viewedDemo = view
@@ -115,6 +118,7 @@ export default function App() {
         demo={viewedDemo}
         email={auth.email}
         isSuperadmin={auth.isSuperadmin}
+        baseDomain={auth.baseDomain}
         refreshing={demos === null}
         onBack={() => setView(null)}
         onRenamed={(renamedTo) => setView({ name: renamedTo, demo: { ...viewedDemo, name: renamedTo } })}
@@ -128,6 +132,7 @@ export default function App() {
       email={auth.email}
       isSuperadmin={auth.isSuperadmin}
       authMode={auth.authMode}
+      baseDomain={auth.baseDomain}
       demos={demos}
       error={demosError}
       onOpenDemo={(demo) => setView({ name: demo.name, demo })}

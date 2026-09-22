@@ -351,12 +351,16 @@ func TestGoogleSuperadminManagesAnyDemo(t *testing.T) {
 	resp := h.do(t, "GET", controlHost, "/api/me", nil,
 		map[string]string{"Cookie": auth.CookieName + "=" + session})
 	var me struct {
-		IsSuperadmin bool `json:"is_superadmin"`
+		IsSuperadmin bool   `json:"is_superadmin"`
+		BaseDomain   string `json:"base_domain"`
 	}
 	json.NewDecoder(resp.Body).Decode(&me)
 	resp.Body.Close()
 	if !me.IsSuperadmin {
 		t.Fatal("listed google session is not superadmin in /api/me")
+	}
+	if me.BaseDomain != "example.com" {
+		t.Errorf("/api/me base_domain = %q, want example.com", me.BaseDomain)
 	}
 
 	// A demo owned by someone else, seeded straight into the store.

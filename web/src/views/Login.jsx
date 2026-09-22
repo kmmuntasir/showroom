@@ -7,7 +7,7 @@ import ErrorAlert from '../components/ErrorAlert.jsx'
 // - google:   server-side Google OAuth — the button only starts the flow.
 // - password: local email/password form posting to POST /api/login; success
 //   hands the session identity (email, role, CSRF token) to the app.
-export default function Login({ bootError, authMode = 'google', onPasswordLogin }) {
+export default function Login({ bootError, authMode = 'google', baseDomain, onPasswordLogin }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loginError, setLoginError] = useState(null)
@@ -39,10 +39,10 @@ export default function Login({ bootError, authMode = 'google', onPasswordLogin 
       <Stack gap={2} align="center" maxW="sm">
         <Heading size="2xl">democtl</Heading>
         {authMode === 'password' ? (
-          <Text color="fg.muted">Self-serve demo hosting on example.com — sign in with your account.</Text>
+          <Text color="fg.muted">Self-serve demo hosting on {baseDomain || 'example.com'} — sign in with your account.</Text>
         ) : (
           <Text color="fg.muted">
-            Self-serve demo hosting on example.com — sign in with your company Google account.
+            Self-serve demo hosting on {baseDomain || 'example.com'} — sign in with your company Google account.
           </Text>
         )}
       </Stack>

@@ -40,13 +40,14 @@ func (s *Server) requireSuperadmin(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // handleAuthInfo is public (no session): the login page needs the active
-// auth mode before it knows which form to render.
+// auth mode before it knows which form to render, and the base domain so
+// live demo links point at the real deployment (never a hardcoded domain).
 func (s *Server) handleAuthInfo(w http.ResponseWriter, _ *http.Request) {
 	mode := s.Cfg.AuthMode
 	if mode == "" {
 		mode = config.AuthModeGoogle
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"auth_mode": mode})
+	writeJSON(w, http.StatusOK, map[string]any{"auth_mode": mode, "base_domain": s.Cfg.BaseDomain})
 }
 
 // handleLogin authenticates a local user (password mode only). Like the

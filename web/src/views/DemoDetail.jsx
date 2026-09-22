@@ -23,7 +23,10 @@ import { toaster } from '../components/toaster.jsx'
 import { humanSize, timeAgoOrDate } from '../format.js'
 import { isValidDemoName, NAME_HINT } from '../names.js'
 
-const liveUrl = (name) => `https://${name}.example.com`
+// liveDemoUrl points at the real deployment: the base domain rides the
+// boot probe (/api/me) so demo links never hardcode a domain. The
+// example.com default only shows before the probe resolves.
+const liveDemoUrl = (baseDomain, name) => `https://${name}.${baseDomain || 'example.com'}`
 
 // keep-2 on the server; the list payload exposes only the last release, so
 // roll back is enabled once two releases are known — via an optional
@@ -33,9 +36,10 @@ const releaseCountOf = (demo) => demo.release_count ?? (demo.last_release ? 1 : 
 // Demo detail: deploy (zip dropzone), rollback, rename, privacy, delete —
 // deploy and settings render only for the demo's owner or a superadmin
 // (docs/demos.md §Control dashboard UI + §Upload pipeline).
-export default function DemoDetail({ demo, email, isSuperadmin, refreshing, onBack, onRenamed, refresh }) {
+export default function DemoDetail({ demo, email, isSuperadmin, baseDomain, refreshing, onBack, onRenamed, refresh }) {
   const name = demo.name
   const canManage = isSuperadmin || email === demo.created_by
+  const liveUrl = (n) => liveDemoUrl(baseDomain, n)
 
   // Deploy
   const [uploading, setUploading] = useState(false)

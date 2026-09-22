@@ -26,12 +26,15 @@ import { humanSize, timeAgoOrDate } from '../format.js'
 import { isValidDemoName, NAME_HINT } from '../names.js'
 import Users from './Users.jsx'
 
-const liveUrl = (name) => `https://${name}.example.com`
+// liveDemoUrl points at the real deployment: the base domain rides the
+// boot probe (/api/me, /api/auth-info) so the dashboard never hardcodes a
+// domain. The example.com default only shows before the probe resolves.
+const liveDemoUrl = (baseDomain, name) => `https://${name}.${baseDomain || 'example.com'}`
 
 // Live demo list + create form (docs/demos.md §Control dashboard UI). The
 // list is API state only — nothing is derived or cached client-side.
 // Superadmins (password mode) additionally get the user management panel.
-export default function Dashboard({ email, isSuperadmin, authMode, demos, error, onOpenDemo, onRefresh, onSignOut }) {
+export default function Dashboard({ email, isSuperadmin, authMode, baseDomain, demos, error, onOpenDemo, onRefresh, onSignOut }) {
   const [name, setName] = useState('')
   const [validationError, setValidationError] = useState(null)
   const [createError, setCreateError] = useState(null)
@@ -60,7 +63,7 @@ export default function Dashboard({ email, isSuperadmin, authMode, demos, error,
       const data = await api.post('/api/demos', { name: trimmed, ...(isPrivate ? { private: true } : {}) })
       toaster.success({
         title: 'Demo created',
-        description: `${liveUrl(trimmed)} is ready for its first deploy.`,
+        description: `${liveDemoUrl(baseDomain, trimmed)} is ready for its first deploy.`,
       })
       // A private demo's access key rides this response exactly once.
       if (data?.access_key) setIssuedKey(data.access_key)
@@ -152,12 +155,12 @@ export default function Dashboard({ email, isSuperadmin, authMode, demos, error,
                     <Table.Cell>{demo.created_by}</Table.Cell>
                     <Table.Cell>
                       <Link
-                        href={liveUrl(demo.name)}
+                        href={liveDemoUrl(baseDomain, demo.name)}
                         target="_blank"
                         rel="noreferrer"
                         colorPalette="teal"
                       >
-                        {liveUrl(demo.name)}
+                        {liveDemoUrl(baseDomain, demo.name)}
                       </Link>
                     </Table.Cell>
                     <Table.Cell>

@@ -189,6 +189,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"auth_mode":     mode,
 		"role":          sess.Role,
 		"is_superadmin": sess.IsSuperadmin(),
+		"base_domain":   s.Cfg.BaseDomain,
 	})
 }
 
