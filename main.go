@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -48,6 +49,25 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+
+	// Password mode needs a superadmin behind the configured address. The
+	// account is created once, when missing — an existing password is never
+	// rotated by rebooting (rotation happens through user management).
+	if cfg.AuthMode == config.AuthModePassword {
+		hash, err := auth.HashPassword(cfg.AdminPassword)
+		if err != nil {
+			return fmt.Errorf("democtl: hash superadmin password: %w", err)
+		}
+		user, created, err := st.EnsureSuperadmin(cfg.AdminEmail, hash, time.Now().UTC().Unix())
+		if err != nil {
+			return fmt.Errorf("democtl: ensure superadmin: %w", err)
+		}
+		if created {
+			slog.Info("superadmin created", "email", user.Email)
+		} else {
+			slog.Info("superadmin exists", "email", user.Email)
+		}
+	}
 
 	auditLog, err := audit.Open(cfg.AuditPath)
 	if err != nil {

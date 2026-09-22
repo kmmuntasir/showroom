@@ -66,11 +66,33 @@ var (
 )
 
 // Session is the authenticated identity the rest of the service sees.
+// Google sessions carry GoogleSub/GoogleEmail with UserID 0; password
+// sessions carry UserID/Email/Role. Email is always populated — it is the
+// audit actor and the dashboard identity in both modes.
 type Session struct {
 	IDHash      string
 	CSRFToken   string
 	GoogleSub   string
 	GoogleEmail string
+	UserID      int64  // owning local user; 0 for Google sessions
+	Email       string // actor email in both modes
+	Role        string // store.RoleSuperadmin / store.RoleUser; "" for Google sessions
+}
+
+// Actor returns the email audit entries and created_by fields attribute to
+// the session — Email in both modes, falling back to the Google column for
+// sessions written before Email existed.
+func (s Session) Actor() string {
+	if s.Email != "" {
+		return s.Email
+	}
+	return s.GoogleEmail
+}
+
+// IsSuperadmin reports whether the session may manage users (password mode
+// only — Google sessions never carry a role).
+func (s Session) IsSuperadmin() bool {
+	return s.UserID != 0 && s.Role == store.RoleSuperadmin
 }
 
 // Deps wires the authenticator. Zero values pick the production defaults;
@@ -207,6 +229,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) (Sessio
 		CSRFToken:   csrf,
 		GoogleSub:   id.Sub,
 		GoogleEmail: id.Email,
+		Email:       id.Email,
 	}
 	if err := a.sessions.CreateSession(store.Session{
 		IDHash:      sess.IDHash,
@@ -223,15 +246,7 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) (Sessio
 	// step 3): set on demos.example.com it is invisible to pages on
 	// <demo>.example.com, which is what keeps a deployed demo from
 	// touching control-plane state.
-	http.SetCookie(w, &http.Cookie{
-		Name:     CookieName,
-		Value:    rawID,
-		Path:     "/",
-		MaxAge:   int(SessionTTL.Seconds()),
-		HttpOnly: true,
-		Secure:   a.secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
+	setSessionCookie(w, a.secureCookie, rawID)
 	return sess, nil
 }
 
@@ -340,7 +355,10 @@ func (a *Authenticator) Logout(w http.ResponseWriter, r *http.Request) {
 
 // Session resolves the request's cookie to a logged-in identity. Expired
 // sessions report false and are deleted lazily; lookup errors are logged
-// without any cookie material and report false.
+// without any cookie material and report false. Password sessions are
+// resolved against the users table on every request, so a deleted user (or
+// a role change) takes effect immediately: sessions of a removed user stop
+// resolving and are deleted lazily.
 func (a *Authenticator) Session(r *http.Request) (Session, bool) {
 	c, err := r.Cookie(CookieName)
 	if err != nil || c.Value == "" {
@@ -360,12 +378,28 @@ func (a *Authenticator) Session(r *http.Request) (Session, bool) {
 		}
 		return Session{}, false
 	}
-	return Session{
+	sess := Session{
 		IDHash:      row.IDHash,
 		CSRFToken:   row.CSRFToken,
 		GoogleSub:   row.GoogleSub,
 		GoogleEmail: row.GoogleEmail,
-	}, true
+		Email:       row.GoogleEmail,
+	}
+	if row.UserID.Valid {
+		user, err := a.sessions.UserByID(row.UserID.Int64)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				slog.Error("auth: session user lookup failed", "err", err)
+			} else if derr := a.sessions.DeleteSession(hash); derr != nil {
+				slog.Error("auth: orphaned session delete failed", "err", derr)
+			}
+			return Session{}, false
+		}
+		sess.UserID = user.ID
+		sess.Email = user.Email
+		sess.Role = user.Role
+	}
+	return sess, true
 }
 
 // CSRF reports whether the request carries the session's X-CSRF-Token

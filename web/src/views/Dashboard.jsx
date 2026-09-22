@@ -21,12 +21,14 @@ import ErrorAlert from '../components/ErrorAlert.jsx'
 import { toaster } from '../components/toaster.jsx'
 import { humanSize, timeAgoOrDate } from '../format.js'
 import { isValidDemoName, NAME_HINT } from '../names.js'
+import Users from './Users.jsx'
 
 const liveUrl = (name) => `https://${name}.example.com`
 
 // Live demo list + create form (docs/demos.md §Control dashboard UI). The
 // list is API state only — nothing is derived or cached client-side.
-export default function Dashboard({ email, demos, error, onOpenDemo, onRefresh, onSignOut }) {
+// Superadmins (password mode) additionally get the user management panel.
+export default function Dashboard({ email, isSuperadmin, demos, error, onOpenDemo, onRefresh, onSignOut }) {
   const [name, setName] = useState('')
   const [validationError, setValidationError] = useState(null)
   const [createError, setCreateError] = useState(null)
@@ -187,6 +189,8 @@ export default function Dashboard({ email, demos, error, onOpenDemo, onRefresh, 
             ) : null}
           </Stack>
         </Box>
+
+        {isSuperadmin ? <Users /> : null}
       </Stack>
     </Container>
   )

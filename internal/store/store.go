@@ -341,22 +341,29 @@ func (s *Store) PruneReleases(demoID int64, keep int) ([]Release, error) {
 
 // Session is a server-side login session. IDHash is the sha256 hex of the
 // cookie value — the raw cookie id is never stored (house rule: tokens
-// hashed at rest).
+// hashed at rest). UserID is the owning local user in password mode and
+// NULL for Google OAuth sessions (which predate the users table and are
+// identified by the Google columns instead).
 type Session struct {
 	IDHash      string
 	CSRFToken   string
 	GoogleSub   string
 	GoogleEmail string
+	UserID      sql.NullInt64
 	CreatedAt   int64
 	ExpiresAt   int64
 }
 
 // CreateSession stores a new session.
 func (s *Store) CreateSession(sess Session) error {
+	var userID any
+	if sess.UserID.Valid {
+		userID = sess.UserID.Int64
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id_hash, csrf_token, google_sub, google_email, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sess.IDHash, sess.CSRFToken, sess.GoogleSub, sess.GoogleEmail, sess.CreatedAt, sess.ExpiresAt,
+		`INSERT INTO sessions (id_hash, csrf_token, google_sub, google_email, user_id, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sess.IDHash, sess.CSRFToken, sess.GoogleSub, sess.GoogleEmail, userID, sess.CreatedAt, sess.ExpiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: create session: %w", err)
@@ -368,9 +375,9 @@ func (s *Store) CreateSession(sess Session) error {
 func (s *Store) SessionByIDHash(idHash string) (Session, error) {
 	var sess Session
 	err := s.db.QueryRow(
-		`SELECT id_hash, csrf_token, google_sub, google_email, created_at, expires_at
+		`SELECT id_hash, csrf_token, google_sub, google_email, user_id, created_at, expires_at
 		 FROM sessions WHERE id_hash = ?`, idHash,
-	).Scan(&sess.IDHash, &sess.CSRFToken, &sess.GoogleSub, &sess.GoogleEmail, &sess.CreatedAt, &sess.ExpiresAt)
+	).Scan(&sess.IDHash, &sess.CSRFToken, &sess.GoogleSub, &sess.GoogleEmail, &sess.UserID, &sess.CreatedAt, &sess.ExpiresAt)
 	return sess, wrapNoRows(err)
 }
 

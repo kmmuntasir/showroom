@@ -78,8 +78,10 @@ func (s *Server) resolveDemoDir(label string) (string, bool) {
 
 func (s *Server) controlMux() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /login", s.Auth.BeginLogin)
+	mux.HandleFunc("GET /login", s.handleLoginBegin)
 	mux.HandleFunc("GET /oauth2/callback", s.handleCallback)
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("GET /api/auth-info", s.handleAuthInfo)
 	mux.HandleFunc("GET /api/me", s.handleMe)
 	mux.HandleFunc("GET /api/demos", s.Auth.RequireSession(s.handleListDemos))
 	// Every mutation carries the session CSRF token (docs/demos.md §Auth
@@ -90,6 +92,13 @@ func (s *Server) controlMux() http.Handler {
 	mux.HandleFunc("POST /api/demos/{name}/rollback", s.Auth.RequireSession(s.requireCSRF(s.handleRollback)))
 	mux.HandleFunc("PATCH /api/demos/{name}", s.Auth.RequireSession(s.requireCSRF(s.handleRename)))
 	mux.HandleFunc("DELETE /api/demos/{name}", s.Auth.RequireSession(s.requireCSRF(s.handleDelete)))
+	// User management is superadmin-only (password mode): session, then
+	// role; mutations additionally carry the CSRF token like every other
+	// mutation. The list is a GET and needs no CSRF.
+	mux.HandleFunc("GET /api/users", s.Auth.RequireSession(s.requireSuperadmin(s.handleListUsers)))
+	mux.HandleFunc("POST /api/users", s.Auth.RequireSession(s.requireSuperadmin(s.requireCSRF(s.handleCreateUser))))
+	mux.HandleFunc("DELETE /api/users/{id}", s.Auth.RequireSession(s.requireSuperadmin(s.requireCSRF(s.handleDeleteUser))))
+	mux.HandleFunc("POST /api/users/{id}/password", s.Auth.RequireSession(s.requireSuperadmin(s.requireCSRF(s.handleResetUserPassword))))
 	mux.Handle("/", s.spaHandler())
 	return mux
 }
@@ -107,9 +116,24 @@ func (s *Server) requireCSRF(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// handleLoginBegin starts the Google OAuth flow — google mode only. In
+// password mode there is no OAuth to begin and the endpoint is dead.
+func (s *Server) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
+	if s.Cfg.AuthMode == config.AuthModePassword {
+		writeErr(w, http.StatusNotFound, "oauth login disabled")
+		return
+	}
+	s.Auth.BeginLogin(w, r)
+}
+
 // handleCallback finishes OAuth; success lands back on the dashboard,
-// failure carries the reason in a query param the SPA can toast.
+// failure carries the reason in a query param the SPA can toast. In
+// password mode the flow can never have started, so the callback is dead.
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if s.Cfg.AuthMode == config.AuthModePassword {
+		http.Redirect(w, r, "/?auth_error=auth_disabled", http.StatusSeeOther)
+		return
+	}
 	sess, err := s.Auth.Callback(w, r)
 	if err != nil {
 		slog.Warn("oauth callback failed", "err", err)
@@ -120,14 +144,14 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?auth_error="+reason, http.StatusSeeOther)
 		return
 	}
-	s.Audit.MustEvent(sess.GoogleEmail, "auth.login", sess.GoogleEmail, nil)
+	s.Audit.MustEvent(sess.Actor(), "auth.login", sess.Actor(), nil)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	sess, _ := auth.FromContext(r.Context())
 	s.Auth.Logout(w, r)
-	s.Audit.MustEvent(sess.GoogleEmail, "auth.logout", sess.GoogleEmail, nil)
+	s.Audit.MustEvent(sess.Actor(), "auth.logout", sess.Actor(), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -137,10 +161,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
+	mode := s.Cfg.AuthMode
+	if mode == "" {
+		mode = config.AuthModeGoogle
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
-		"email":         sess.GoogleEmail,
+		"email":         sess.Actor(),
 		"csrf_token":    sess.CSRFToken,
+		"auth_mode":     mode,
+		"role":          sess.Role,
+		"is_superadmin": sess.IsSuperadmin(),
 	})
 }
 
@@ -209,7 +240,7 @@ func (s *Server) handleCreateDemo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name must be 2-32 chars: lowercase letters, digits, hyphens")
 		return
 	}
-	d, err := s.DB.CreateDemo(body.Name, sess.GoogleEmail, time.Now().UTC().Unix())
+	d, err := s.DB.CreateDemo(body.Name, sess.Actor(), time.Now().UTC().Unix())
 	if errors.Is(err, store.ErrNameTaken) {
 		writeErr(w, http.StatusConflict, "name already taken")
 		return
@@ -219,7 +250,7 @@ func (s *Server) handleCreateDemo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.Audit.MustEvent(sess.GoogleEmail, "demo.create", body.Name, nil)
+	s.Audit.MustEvent(sess.Actor(), "demo.create", body.Name, nil)
 	writeJSON(w, http.StatusCreated, map[string]any{"demo": demoToJSON(store.DemoWithLatest{Demo: d})})
 }
 
@@ -275,7 +306,7 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC().Unix()
-	if _, err := s.DB.AddRelease(demo.ID, res.Dir, sess.GoogleEmail, res.SizeBytes, res.FileCount, now); err != nil {
+	if _, err := s.DB.AddRelease(demo.ID, res.Dir, sess.Actor(), res.SizeBytes, res.FileCount, now); err != nil {
 		slog.Error("record release", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
@@ -287,11 +318,11 @@ func (s *Server) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = s.DB.TouchDemo(demo.ID, now)
-	s.Audit.MustEvent(sess.GoogleEmail, "demo.deploy", demo.Name, map[string]any{
+	s.Audit.MustEvent(sess.Actor(), "demo.deploy", demo.Name, map[string]any{
 		"size_bytes": res.SizeBytes, "file_count": res.FileCount, "dir": res.Dir,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{"release": releaseJSON{
-		UploadedAt: now, UploadedBy: sess.GoogleEmail, SizeBytes: res.SizeBytes, FileCount: res.FileCount,
+		UploadedAt: now, UploadedBy: sess.Actor(), SizeBytes: res.SizeBytes, FileCount: res.FileCount,
 	}})
 }
 
@@ -317,7 +348,7 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.Audit.MustEvent(sess.GoogleEmail, "demo.rollback", demo.Name, map[string]any{"dir": target.Dir})
+	s.Audit.MustEvent(sess.Actor(), "demo.rollback", demo.Name, map[string]any{"dir": target.Dir})
 	writeJSON(w, http.StatusOK, map[string]any{"release": releaseJSON{
 		UploadedAt: target.UploadedAt, UploadedBy: target.UploadedBy,
 		SizeBytes: target.SizeBytes, FileCount: target.FileCount,
@@ -360,7 +391,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 	if err := s.Uploads.RenameDemoDir(demo.Name, body.Name); err != nil {
 		slog.Error("rename demo dir", "err", err)
 	}
-	s.Audit.MustEvent(sess.GoogleEmail, "demo.rename", body.Name, map[string]any{"from": demo.Name})
+	s.Audit.MustEvent(sess.Actor(), "demo.rename", body.Name, map[string]any{"from": demo.Name})
 	writeJSON(w, http.StatusOK, map[string]any{"demo": demoToJSON(store.DemoWithLatest{Demo: demo})})
 }
 
@@ -380,7 +411,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	s.Audit.MustEvent(sess.GoogleEmail, "demo.delete", demo.Name, nil)
+	s.Audit.MustEvent(sess.Actor(), "demo.delete", demo.Name, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

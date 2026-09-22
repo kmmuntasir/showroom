@@ -21,6 +21,16 @@ const (
 	// bytes of entropy minimum so cookie signing never leans on a short
 	// secret (docs/demos.md §Auth).
 	SessionKeyBytes = 32
+	// AuthModeGoogle is the default: Google Workspace OAuth. AuthModePassword
+	// switches the control plane to local email/password logins backed by
+	// the users table; the mode is deployment-wide and picked via
+	// DEMOCTL_AUTH_MODE.
+	AuthModeGoogle   = "google"
+	AuthModePassword = "password"
+	// MinPasswordLength is the minimum bootstrap superadmin password length
+	// in password mode. It applies to the env-provided credential only;
+	// per-user password policy lives in the auth package.
+	MinPasswordLength = 12
 )
 
 // Limits are deployment policy, not operator configuration — they ship as
@@ -53,9 +63,17 @@ type Config struct {
 	AuditPath   string
 	SessionKey  string
 
+	// AuthMode is AuthModeGoogle (default) or AuthModePassword.
+	AuthMode string
+
 	GoogleClientID     string
 	GoogleClientSecret string
 	WorkspaceDomain    string // Google Workspace domain — enforced server-side at callback
+
+	// AdminEmail/AdminPassword bootstrap the superadmin in password mode;
+	// the account is created at boot only if it does not exist yet.
+	AdminEmail    string
+	AdminPassword string
 
 	Limits Limits
 }
@@ -119,10 +137,40 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, fmt.Errorf("DEMOCTL_SESSION_KEY must be at least %d bytes", SessionKeyBytes))
 	}
 
-	req(&cfg.GoogleClientID, "GOOGLE_CLIENT_ID")
-	req(&cfg.GoogleClientSecret, "GOOGLE_CLIENT_SECRET")
-	req(&cfg.WorkspaceDomain, "GOOGLE_WORKSPACE_DOMAIN")
-	cfg.WorkspaceDomain = strings.ToLower(cfg.WorkspaceDomain)
+	// The auth mode is deployment-wide: exactly one login mechanism is
+	// active. Empty keeps the historical default (Google OAuth) so existing
+	// deployments boot unchanged.
+	cfg.AuthMode = strings.ToLower(strings.TrimSpace(getenv("DEMOCTL_AUTH_MODE")))
+	if cfg.AuthMode == "" {
+		cfg.AuthMode = AuthModeGoogle
+	}
+	if cfg.AuthMode != AuthModeGoogle && cfg.AuthMode != AuthModePassword {
+		errs = append(errs, fmt.Errorf("DEMOCTL_AUTH_MODE %q must be %q or %q", cfg.AuthMode, AuthModeGoogle, AuthModePassword))
+	}
+
+	if cfg.AuthMode == AuthModeGoogle {
+		req(&cfg.GoogleClientID, "GOOGLE_CLIENT_ID")
+		req(&cfg.GoogleClientSecret, "GOOGLE_CLIENT_SECRET")
+		req(&cfg.WorkspaceDomain, "GOOGLE_WORKSPACE_DOMAIN")
+		cfg.WorkspaceDomain = strings.ToLower(cfg.WorkspaceDomain)
+	} else if cfg.AuthMode == AuthModePassword {
+		// Google credentials are meaningless here and must not be
+		// required; the bootstrap superadmin takes their place.
+		email := strings.ToLower(strings.TrimSpace(getenv("DEMOCTL_ADMIN_EMAIL")))
+		if email == "" || !strings.Contains(email, "@") || strings.Contains(email, " ") {
+			errs = append(errs, errors.New("DEMOCTL_ADMIN_EMAIL is required and must be a valid email address"))
+		} else {
+			cfg.AdminEmail = email
+		}
+		// The password is used verbatim — never trimmed (spaces can be
+		// significant) and never echoed back in an error.
+		password := getenv("DEMOCTL_ADMIN_PASSWORD")
+		if len(password) < MinPasswordLength {
+			errs = append(errs, fmt.Errorf("DEMOCTL_ADMIN_PASSWORD must be at least %d characters", MinPasswordLength))
+		} else {
+			cfg.AdminPassword = password
+		}
+	}
 
 	cfg.Limits = DefaultLimits()
 
